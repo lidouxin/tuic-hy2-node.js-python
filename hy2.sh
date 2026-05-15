@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # -*- coding: utf-8 -*-
-# Hysteria2 极简部署脚本（支持命令行端口参数 + 默认跳过证书验证）
-# 适用于超低内存环境（32-64MB）
+# Hysteria2 极速抢占带宽版部署脚本（支持命令行端口参数 + 默认跳过证书验证）
+# 针对高延迟、高丢包链路激进优化，同时兼顾低内存（32-64MB）环境
 
 set -e
 
@@ -16,7 +16,7 @@ ALPN="h3"
 # ------------------------------
 
 echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
-echo "Hysteria2 极简部署脚本（Shell 版）"
+echo "Hysteria2 激进网速抢占部署脚本（Shell 版）"
 echo "支持命令行端口参数，如：bash hysteria2.sh 443"
 echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
 
@@ -76,7 +76,7 @@ ensure_cert() {
     echo "✅ 证书生成成功。"
 }
 
-# ---------- 写配置文件 ----------
+# ---------- 写配置文件（狂暴抢占网速优化） ----------
 write_config() {
 cat > server.yaml <<EOF
 listen: ":${SERVER_PORT}"
@@ -88,18 +88,29 @@ tls:
 auth:
   type: "password"
   password: "${AUTH_PASSWORD}"
+
+# 解锁带宽上限
 bandwidth:
-  up: "200mbps"
-  down: "200mbps"
+  up: "1gbps"
+  down: "1gbps"
+
+# 核心抢占与速度优化参数
 quic:
-  max_idle_timeout: "10s"
-  max_concurrent_streams: 4
-  initial_stream_receive_window: 65536
-  max_stream_receive_window: 131072
-  initial_conn_receive_window: 131072
-  max_conn_receive_window: 262144
+  # 减少空闲超时，快速释放无效连接，防死锁
+  max_idle_timeout: "30s"
+  # 允许的最大并发流，16个足够榨干单用户带宽
+  max_concurrent_streams: 16
+  
+  # 激进接收窗口优化：扩大到 4MB-8MB，确保高延迟长肥管道（LFN）跑满
+  initial_stream_receive_window: 4194304
+  max_stream_receive_window: 8388608
+  initial_conn_receive_window: 8388608
+  max_conn_receive_window: 16777216
+  
+  # 【终极抢占】开启忽略丢包模式，防止网络抖动时暴力降速
+  ignore_packet_loss: true
 EOF
-    echo "✅ 写入配置 server.yaml（端口=${SERVER_PORT}, SNI=${SNI}, ALPN=${ALPN}）。"
+    echo "✅ 写入配置 server.yaml（已注入网速抢占优化）。"
 }
 
 # ---------- 获取服务器 IP ----------
@@ -111,27 +122,20 @@ get_server_ip() {
 # ---------- 打印连接信息 ----------
 print_connection_info() {
     local IP="$1"
-    echo "🎉 Hysteria2 部署成功！（极简优化版）"
+    echo "🎉 Hysteria2 部署成功！（狂暴抢占优化版）"
     echo "=========================================================================="
     echo "📋 服务器信息:"
-    echo "   🌐 IP地址: $IP"
-    echo "   🔌 端口: $SERVER_PORT"
-    echo "   🔑 密码: $AUTH_PASSWORD"
+    echo "    🌐 IP地址: $IP"
+    echo "    🔌 端口: $SERVER_PORT"
+    echo "    🔑 密码: $AUTH_PASSWORD"
     echo ""
-    echo "📱 节点链接（SNI=${SNI}, ALPN=${ALPN}, 跳过证书验证）:"
-    echo "hysteria2://${AUTH_PASSWORD}@${IP}:${SERVER_PORT}?sni=${SNI}&alpn=${ALPN}&insecure=1#Hy2-Bing"
+    echo "📱 节点链接（客户端也需要配置对应的速度或不限速）："
+    echo "hysteria2://${AUTH_PASSWORD}@${IP}:${SERVER_PORT}?sni=${SNI}&alpn=${ALPN}&insecure=1#Hy2-Turbo"
     echo ""
-    echo "📄 客户端配置文件:"
-    echo "server: ${IP}:${SERVER_PORT}"
-    echo "auth: ${AUTH_PASSWORD}"
-    echo "tls:"
-    echo "  sni: ${SNI}"
-    echo "  alpn: [\"${ALPN}\"]"
-    echo "  insecure: true"
-    echo "socks5:"
-    echo "  listen: 127.0.0.1:1080"
-    echo "http:"
-    echo "  listen: 127.0.0.1:8080"
+    echo "📄 建议客户端（Client）配置中加上："
+    echo "bandwidth:"
+    echo "  up: 100mbps   # 根据你本地实际宽带上传填写"
+    echo "  down: 500mbps # 根据你本地实际宽带下载填写"
     echo "=========================================================================="
 }
 
@@ -142,11 +146,8 @@ main() {
     write_config
     SERVER_IP=$(get_server_ip)
     print_connection_info "$SERVER_IP"
-    echo "🚀 启动 Hysteria2 服务器..."
+    echo "🚀 以狂暴速度模式启动 Hysteria2 服务器..."
     exec "$BIN_PATH" server -c server.yaml
 }
 
 main "$@"
-
-
-
