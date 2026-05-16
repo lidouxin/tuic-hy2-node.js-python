@@ -1,35 +1,39 @@
 #!/usr/bin/env bash
 # -*- coding: utf-8 -*-
-# Hysteria2 极速抢占带宽版部署脚本（支持命令行端口参数 + 默认跳过证书验证）
-# 针对高延迟、高丢包链路激进优化，同时兼顾低内存（32-64MB）环境
+# Hysteria2 翼龙面板单端口晚高峰抗封锁优化版
+# 针对 Docker 容器网络栈与晚高峰运营商 UDP QoS 限速进行深度调优
 
 set -e
 
-# ---------- 默认配置 ----------
+# ---------- 翼龙面板环境适配 ----------
+# 翼龙面板通常将工作目录限制在 /home/container
+WORKSPACE="/home/container"
+cd "$WORKSPACE"
+
 HYSTERIA_VERSION="v2.6.5"
-DEFAULT_PORT=22222         # 自适应端口
-AUTH_PASSWORD="wdx526"   # 建议修改为复杂密码
+AUTH_PASSWORD="wdx526"   # 建议修改为你的复杂密码
 CERT_FILE="cert.pem"
 KEY_FILE="key.pem"
 SNI="www.bing.com"
 ALPN="h3"
-# ------------------------------
 
-echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
-echo "Hysteria2 激进网速抢占部署脚本（Shell 版）"
-echo "支持命令行端口参数，如：bash hysteria2.sh 443"
-echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+echo "=========================================================================="
+echo " Hysteria2 翼龙面板专用部署脚本 (单端口抗晚高峰断流优化版)"
+echo "=========================================================================="
 
-# ---------- 获取端口 ----------
-if [[ $# -ge 1 && -n "${1:-}" ]]; then
-    SERVER_PORT="$1"
-    echo "✅ 使用命令行指定端口: $SERVER_PORT"
+# ---------- 获取翼龙分配的端口 ----------
+# 翼龙面板通常会传递当前的 PORT 变量，如果没有则使用面板配置的参数 $1
+if [ -n "${SERVER_PORT:-}" ]; then
+    PORT="$SERVER_PORT"
+elif [[ $# -ge 1 && -n "${1:-}" ]]; then
+    PORT="$1"
 else
-    SERVER_PORT="${SERVER_PORT:-$DEFAULT_PORT}"
-    echo "⚙️ 未提供端口参数，使用默认端口: $SERVER_PORT"
+    # 如果实在找不到，默认使用 22222（请确保这与面板分配的端口一致）
+    PORT=22222
 fi
+echo "📢 当前容器绑定端口: $PORT"
 
-# ---------- 检测架构 ----------
+# ---------- 检测 CPU 架构 ----------
 arch_name() {
     local machine
     machine=$(uname -m | tr '[:upper:]' '[:lower:]')
@@ -49,93 +53,102 @@ if [ -z "$ARCH" ]; then
 fi
 
 BIN_NAME="hysteria-linux-${ARCH}"
-BIN_PATH="./${BIN_NAME}"
+BIN_PATH="${WORKSPACE}/${BIN_NAME}"
 
 # ---------- 下载二进制 ----------
 download_binary() {
     if [ -f "$BIN_PATH" ]; then
-        echo "✅ 二进制已存在，跳过下载。"
+        echo "✅ Hysteria2 二进制文件已存在，跳过下载。"
         return
     fi
     URL="https://github.com/apernet/hysteria/releases/download/app/${HYSTERIA_VERSION}/${BIN_NAME}"
-    echo "⏳ 下载: $URL"
-    curl -L --retry 3 --connect-timeout 30 -o "$BIN_PATH" "$URL"
+    echo "⏳ 正在从 GitHub 下载二进制文件..."
+    curl -L --retry 3 --connect-timeout 20 -o "$BIN_PATH" "$URL"
     chmod +x "$BIN_PATH"
-    echo "✅ 下载完成并设置可执行: $BIN_PATH"
+    echo "✅ 下载完成并成功赋予执行权限。"
 }
 
-# ---------- 生成证书 ----------
+# ---------- 生成自签证书 ----------
 ensure_cert() {
-    if [ -f "$CERT_FILE" ] && [ -f "$KEY_FILE" ]; then
-        echo "✅ 发现证书，使用现有 cert/key。"
+    if [ -f "$WORKSPACE/$CERT_FILE" ] && [ -f "$WORKSPACE/$KEY_FILE" ]; then
+        echo "✅ 发现现有证书，跳过生成。"
         return
     fi
-    echo "🔑 未发现证书，使用 openssl 生成自签证书（prime256v1）..."
+    echo "🔑 未发现证书，正在生成 10 年期自签证书 (prime256v1)..."
     openssl req -x509 -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
-        -days 3650 -keyout "$KEY_FILE" -out "$CERT_FILE" -subj "/CN=${SNI}"
+        -days 3650 -keyout "$WORKSPACE/$KEY_FILE" -out "$WORKSPACE/$CERT_FILE" -subj "/CN=${SNI}"
     echo "✅ 证书生成成功。"
 }
 
-# ---------- 写配置文件（狂暴抢占网速优化） ----------
+# ---------- 写配置文件（针对单端口 Docker 与晚高峰抗 QoS 调优） ----------
 write_config() {
-cat > server.yaml <<EOF
-listen: ":${SERVER_PORT}"
+cat > "$WORKSPACE/server.yaml" <<EOF
+# 绑定翼龙分配的唯一端口
+listen: ":${PORT}"
+
 tls:
-  cert: "$(pwd)/${CERT_FILE}"
-  key: "$(pwd)/${KEY_FILE}"
+  cert: "$WORKSPACE/${CERT_FILE}"
+  key: "$WORKSPACE/${KEY_FILE}"
   alpn:
     - "${ALPN}"
+
 auth:
   type: "password"
   password: "${AUTH_PASSWORD}"
 
-# 解锁带宽上限
+# 【抗 QoS 核心优化 1】降低单端口宣称带宽
+# 在晚高峰，将单端口限速在 150M 左右是最稳妥的。
+# 填 1Gbps 会导致 Docker 虚拟网卡疯狂重传丢包，直接触发运营商断流，网页疯狂转圈。
 bandwidth:
-  up: "1gbps"
-  down: "1gbps"
+  up: "150mbps"
+  down: "150mbps"
 
-# 核心抢占与速度优化参数
 quic:
-  # 减少空闲超时，快速释放无效连接，防死锁
-  max_idle_timeout: "30s"
-  # 允许的最大并发流，16个足够榨干单用户带宽
-  max_concurrent_streams: 16
+  # 【抗 QoS 核心优化 2】缩短断流超时时间
+  # 晚高峰一旦遇到运营商短暂的 UDP 阻断，让连接在 10 秒内快速断开并重连，而不是让网页死等转圈
+  max_idle_timeout: "10s"
   
-  # 激进接收窗口优化：扩大到 4MB-8MB，确保高延迟长肥管道（LFN）跑满
-  initial_stream_receive_window: 4194304
-  max_stream_receive_window: 8388608
-  initial_conn_receive_window: 8388608
-  max_conn_receive_window: 16777216
+  # 限制最大并发流，降低单端口 Docker 容器的 Conntrack（连接跟踪）表压力
+  max_concurrent_streams: 32
   
-  # 【终极抢占】开启忽略丢包模式，防止网络抖动时暴力降速
-  ignore_packet_loss: true
+  # 【抗 QoS 核心优化 3】收紧接收窗口大小
+  # 放弃之前 8MB/16MB 的狂暴参数。晚高峰单端口根本吃不下那么大的缓冲区，会导致严重的丢包。
+  # 适当收紧窗口，流量更平滑，防火墙更不容易识别。
+  initial_stream_receive_window: 1048576    # 1MB
+  max_stream_receive_window: 2097152        # 2MB
+  initial_conn_receive_window: 2097152      # 2MB
+  max_conn_receive_window: 4194304          # 4MB
+  
+  # 【抗 QoS 核心优化 4】严禁开启忽略丢包
+  # 晚高峰开启 ignore_packet_loss 会导致单端口产生海量的无效重传特征，瞬间被防火墙拉黑。
+  ignore_packet_loss: false
 EOF
-    echo "✅ 写入配置 server.yaml（已注入网速抢占优化）。"
+    echo "✅ 针对翼龙单端口优化的 server.yaml 配置文件写入成功。"
 }
 
 # ---------- 获取服务器 IP ----------
 get_server_ip() {
-    IP=$(curl -s --max-time 10 https://api.ipify.org || echo "YOUR_SERVER_IP")
+    IP=$(curl -s --max-time 5 https://api.ipify.org || echo "YOUR_SERVER_IP")
     echo "$IP"
 }
 
-# ---------- 打印连接信息 ----------
+# ---------- 打印节点信息 ----------
 print_connection_info() {
     local IP="$1"
-    echo "🎉 Hysteria2 部署成功！（狂暴抢占优化版）"
     echo "=========================================================================="
-    echo "📋 服务器信息:"
-    echo "    🌐 IP地址: $IP"
-    echo "    🔌 端口: $SERVER_PORT"
-    echo "    🔑 密码: $AUTH_PASSWORD"
-    echo ""
-    echo "📱 节点链接（客户端也需要配置对应的速度或不限速）："
-    echo "hysteria2://${AUTH_PASSWORD}@${IP}:${SERVER_PORT}?sni=${SNI}&alpn=${ALPN}&insecure=1#Hy2-Turbo"
-    echo ""
-    echo "📄 建议客户端（Client）配置中加上："
-    echo "bandwidth:"
-    echo "  up: 100mbps   # 根据你本地实际宽带上传填写"
-    echo "  down: 500mbps # 根据你本地实际宽带下载填写"
+    echo "🎉 Hysteria2 晚高峰稳定版配置成功！"
+    echo "📋 节点连接信息:"
+    echo "    🌐 服务器 IP : $IP"
+    echo "    🔌 容器端口  : $PORT"
+    echo "    🔑 认证密码  : $AUTH_PASSWORD"
+    echo "=========================================================================="
+    echo "📱 通用客户端节点链接 (已开启跳过证书验证):"
+    echo "hysteria2://${AUTH_PASSWORD}@${IP}:${PORT}?sni=${SNI}&alpn=${ALPN}&insecure=1#Hy2-Pterodactyl"
+    echo "=========================================================================="
+    echo "⚠️【极为重要】为了防止晚高峰网页转圈，请必须在你的客户端（电脑/手机）中限速："
+    echo "  bandwidth:"
+    echo "    up: 20mbps    # 根据你本地宽带上传的 30% 填写"
+    echo "    down: 45mbps  # 严格限制在 50M 以下！主动限速能让流量平滑，躲过晚高峰 QoS 惩罚"
     echo "=========================================================================="
 }
 
@@ -146,8 +159,9 @@ main() {
     write_config
     SERVER_IP=$(get_server_ip)
     print_connection_info "$SERVER_IP"
-    echo "🚀 以狂暴速度模式启动 Hysteria2 服务器..."
-    exec "$BIN_PATH" server -c server.yaml
+    
+    echo "🚀 正在启动 Hysteria2 服务..."
+    exec "$BIN_PATH" server -c "$WORKSPACE/server.yaml"
 }
 
 main "$@"
